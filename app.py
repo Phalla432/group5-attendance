@@ -18,9 +18,8 @@ def home():
     return "Welcome API"
 
 # get all users
-
 @app.route('/students', methods=['GET'])
-def get_students():
+def get_users():
     currentDB = mysql.connection.cursor()
     currentDB.execute("SELECT * FROM students")
     data = currentDB.fetchall()
@@ -30,12 +29,9 @@ def get_students():
         userData = {
             'id': student[0],
             'name': student[1],
-            'class':student[2]
         }
         students.append(userData)
     return jsonify(students)
-
-
 
 if __name__ == '__main__':
     app.run(debug=True)
