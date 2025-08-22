@@ -1,75 +1,99 @@
 import argparse
 import os
 import cv2
+import pyttsx3
 from ultralytics import YOLO
 
-def parse_args():
-    ap = argparse.ArgumentParser(description="YOLOv8 detection (vehicles).")
-    ap.add_argument("--source", type=str, default="0", help="Camera index or video path (use 0 for webcam)")
-    ap.add_argument("--weights", type=str, default="", help="Path to weights. If empty, uses config or yolov8n.pt")
-    ap.add_argument("--conf", type=float, default=None, help="Confidence threshold override")
-    ap.add_argument("--iou", type=float, default=None, help="NMS IoU threshold override")
-    ap.add_argument("--imgsz", type=int, default=None, help="Inference image size")
-    ap.add_argument("--save", action="store_true", help="Save annotated video to outputs/")
-    return ap.parse_args()
+# --- Load reference images ---
+def load_reference_images(folder="check_attendance"):
+    references = {}
+    orb = cv2.ORB_create()
+    for file in os.listdir(folder):
+        path = os.path.join(folder, file)
+        if not os.path.isfile(path):
+            continue
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        kp, des = orb.detectAndCompute(img, None)
+        references[file] = (kp, des)
+    return references
 
-def load_config():
-    import json, pathlib
-    cfg_path = pathlib.Path(__file__).resolve().parents[1] / "config.json"
-    if cfg_path.exists():
-        with open(cfg_path, "r") as f:
-            return json.load(f)
-    return {}
+# --- Match function ---
+def is_match(des1, des2, threshold=20):
+    if des1 is None or des2 is None:
+        return False
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    return len(matches) > threshold
 
-def open_source(src_str):
-    # Handle webcam index vs path
-    if src_str.isdigit():
-        return int(src_str)
-    return src_str
+# --- Text-to-speech function ---
+def speak(message):
+    engine = pyttsx3.init()
+    engine.say(message)
+    engine.runAndWait()
 
 def main():
-    args = parse_args()
-    cfg = load_config()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", type=str, default="0")
+    args = parser.parse_args()
 
-    model_path = args.weights or cfg.get("model", "")
-    # Fallback to default small model if no custom weights present
-    if not model_path or not os.path.isfile(model_path):
-        model_path = "yolov8n.pt"  # downloaded automatically by Ultralytics
+    # Load YOLO model (detect people/faces depending on model)
+    model = YOLO("yolov8n.pt")
 
-    conf = args.conf if args.conf is not None else cfg.get("conf", 0.25)
-    iou = args.iou if args.iou is not None else cfg.get("iou", 0.45)
-    imgsz = args.imgsz if args.imgsz is not None else cfg.get("imgsz", 640)
+    # Load reference pictures
+    references = load_reference_images("check_attendance")
+    orb = cv2.ORB_create()
 
-    model = YOLO(model_path)
-    source = open_source(args.source)
+    source = 0 if args.source.isdigit() else args.source
+    cap = cv2.VideoCapture(source)
 
-    save_path = None
-    writer = None
-    if args.save:
-        os.makedirs("outputs", exist_ok=True)
-        # Prepare writer after we read first frame to know size
-        cap = cv2.VideoCapture(0 if isinstance(source, int) else source)
-        ok, frame = cap.read()
-        if not ok:
-            print("Could not read from source to initialize writer.")
-            return
-        h, w = frame.shape[:2]
-        save_path = os.path.join("outputs", "detect_annotated.mp4")
-        writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (w, h))
-        cap.release()
+    spoken = None  # Track last spoken message
 
-    for result in model.predict(source=source, conf=conf, iou=iou, imgsz=imgsz, stream=True):
-        frame = result.plot()
-        cv2.imshow("YOLOv8 Vehicle Detection", frame)
-        if writer is not None:
-            writer.write(frame)
-        if (cv2.waitKey(1) & 0xFF) == 27:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
             break
 
-    if writer is not None:
-        writer.release()
-        print(f"Saved: {save_path}")
+        # Run YOLO detection
+        results = model.predict(frame, conf=0.5)
+        for r in results:
+            for box in r.boxes.xyxy:  # bounding boxes
+                x1, y1, x2, y2 = map(int, box[:4])
+                roi = frame[y1:y2, x1:x2]
+
+                # Convert detected ROI to grayscale
+                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                kp, des = orb.detectAndCompute(gray, None)
+
+                matched = False
+                for name, (ref_kp, ref_des) in references.items():
+                    if is_match(des, ref_des):
+                        cv2.putText(frame, "You can join!", (x1, y1-10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+                        if spoken != "join":   # Prevent repeat
+                            speak("You can join!")
+                            spoken = "join"
+                        matched = True
+                        break
+
+                if not matched:
+                    cv2.putText(frame, "no no you can't join!", (x1, y1-10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)
+                    if spoken != "nojoin":   # Prevent repeat
+                        speak("no no you can't join!")
+                        spoken = "nojoin"
+
+                cv2.rectangle(frame, (x1,y1), (x2,y2), (255,0,0), 2)
+
+        cv2.imshow("Attendance Check", frame)
+        if cv2.waitKey(1) & 0xFF == 27:  # ESC to exit
+            break
+
+    cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
+
+
